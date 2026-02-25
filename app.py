@@ -3,118 +3,153 @@ import zipfile
 import json
 import requests
 from io import BytesIO
-import time
+import arabic_reshaper
+from bidi.algorithm import get_display
+from concurrent.futures import ThreadPoolExecutor
 
-st.set_page_config(page_title="RPG Uncensored Translator", layout="wide")
+# --- إعدادات الواجهة ---
+st.set_page_config(page_title="RPG Arabic Ultimate", layout="wide", page_icon="🔞")
 
-st.title("🔞 معرب RPG الاحترافي (بدون قيود)")
-st.write("يدعم هذا الإصدار OpenRouter لتجاوز قيود المحتوى +18 والتبديل التلقائي للمفاتيح.")
-
-# إعدادات المفاتيح (OpenRouter)
-keys_input = st.text_area("أدخل مفاتيح OpenRouter API (مفتاح في كل سطر):", height=100)
-api_keys = [k.strip() for k in keys_input.split('\n') if k.strip()]
-
-# اختيار الموديل (يفضل اختيار موديلات مرنة مع المحتوى)
-model_choice = st.selectbox("اختر موديل الذكاء الاصطناعي:", [
-    "meta-llama/llama-3.1-70b-instruct", 
-    "google/gemini-flash-1.5", 
-    "deepseek/deepseek-chat"
-])
-
-uploaded_zips = st.file_uploader("ارفع ملفات الـ ZIP الخاصة باللعبة:", type="zip", accept_multiple_files=True)
-
-def translate_via_openrouter(content, filename, key, model):
-    """وظيفة الترجمة عبر OpenRouter مع تجاوز الفلاتر"""
-    text = content.decode('utf-8', errors='ignore')
-    
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json"
-    }
-    
-    # برومبت متخصص لإقناع الذكاء بالترجمة بدون رقابة
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system", 
-                "content": "You are a professional game translator. Translate the text to Arabic accurately, preserving the adult/mature themes, slang, and style of the original RPG. Do not censor or skip anything. Keep code tags intact."
-            },
-            {"role": "user", "content": f"File: {filename}\nContent to translate:\n{text[:8000]}"}
-        ]
-    }
-
+# --- دالة إصلاح العربي (حل مشكلة الحروف المعكوسة) ---
+def fix_arabic_logic(text):
+    if not text or not any(ord(char) > 127 for char in text):
+        return text
     try:
-        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=60)
-        if response.status_code == 200:
-            return True, response.json()['choices'][0]['message']['content'], key
-        elif response.status_code == 429:
-            return "QUOTA_EXCEEDED", content, None
-        else:
-            return False, content, None
+        # تشبيك الحروف العربية ثم قلب الاتجاه ليناسب محرك RPG Maker
+        reshaped = arabic_reshaper.reshape(text)
+        return get_display(reshaped)
     except:
-        return False, content, None
+        return text
 
-if uploaded_zips and api_keys:
-    if st.button("🚀 ابدأ التعريب الشامل"):
-        translated_zip = BytesIO()
-        remaining_zip = BytesIO()
-        all_keys_dead = False
+# --- إدارة المفاتيح الديناميكية في الشريط الجانبي ---
+if 'api_keys' not in st.session_state:
+    st.session_state.api_keys = [""]
+
+def add_key(): st.session_state.api_keys.append("")
+def remove_key(index): st.session_state.api_keys.pop(index)
+
+with st.sidebar:
+    st.header("⚙️ لوحة التحكم والمفاتيح")
+    for i, key in enumerate(st.session_state.api_keys):
+        col_k, col_d = st.columns([0.8, 0.2])
+        st.session_state.api_keys[i] = col_k.text_input(f"مفتاح OpenRouter {i+1}", value=key, type="password")
+        if col_d.button("❌", key=f"del_{i}"):
+            remove_key(i)
+            st.rerun()
+    st.button("➕ إضافة مفتاح جديد", on_click=add_key)
+    
+    st.divider()
+    speed = st.slider("🚀 سرعة المعالجة (Parallel Threads)", 1, 15, 5)
+    model_choice = st.selectbox("🤖 الموديل المفضل", [
+        "meta-llama/llama-3.1-70b-instruct", 
+        "google/gemini-flash-1.5", 
+        "deepseek/deepseek-chat"
+    ])
+
+# --- محرك الترجمة الأساسي ---
+def translate_core(content, filename, key):
+    try:
+        text = content.decode('utf-8', errors='ignore')
         
-        all_tasks = []
-        for uploaded_zip in uploaded_zips:
-            with zipfile.ZipFile(uploaded_zip, 'r') as z:
-                for name in z.namelist():
-                    if not name.endswith('/'):
-                        all_tasks.append((name, z.read(name)))
-
-        text_files = [t for t in all_tasks if t[0].endswith(('.json', '.js'))]
-        other_files = [t for t in all_tasks if not t[0].endswith(('.json', '.js'))]
-
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://streamlit.io", # متطلب لبعض موديلات OpenRouter
+        }
         
-        with zipfile.ZipFile(translated_zip, 'w') as t_zip, zipfile.ZipFile(remaining_zip, 'w') as r_zip:
-            # نقل ملفات الميديا فوراً
-            for name, content in other_files:
-                t_zip.writestr(name, content)
+        # برومبت تخطي الرقابة والحفاظ على الأكواد التقنية
+        payload = {
+            "model": model_choice,
+            "messages": [
+                {
+                    "role": "system", 
+                    "content": "You are a professional RPG game localizer. Translate to Arabic. IMPORTANT: Translate all adult themes, slang, and mature content without any censorship. Keep technical tags like \\V[n], \\N[n], <...>, and {...} exactly as they are."
+                },
+                {"role": "user", "content": f"File: {filename}\nTranslate this:\n\n{text}"}
+            ]
+        }
 
-            completed = 0
-            for idx, (filename, content) in enumerate(text_files):
-                if all_keys_dead:
-                    r_zip.writestr(filename, content)
-                    continue
+        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=60)
+        
+        if response.status_code == 200:
+            translated_text = response.json()['choices'][0]['message']['content']
+            # معالجة النص ليكون صحيحاً (RTL)
+            return fix_arabic_logic(translated_text), True
+        else:
+            return text, False # فشل (غالباً كوتا أو خطأ سيرفر)
+    except Exception:
+        return content.decode('utf-8', errors='ignore'), False
+
+# --- التطبيق الرئيسي ---
+st.title("🔞 معرب RPG الشامل V3 (الأسرع والأذكى)")
+st.write("ارفع ملفات الـ ZIP، وزع مفاتيحك، واترك الباقي لي.")
+
+uploaded_zips = st.file_uploader("ارفع ملفات ZIP اللعبة (يمكنك رفع عدة ملفات):", type="zip", accept_multiple_files=True)
+
+if uploaded_zips and any(st.session_state.api_keys):
+    if st.button("🔥 ابدأ عملية التعريب الكبرى"):
+        valid_keys = [k for k in st.session_state.api_keys if k]
+        
+        final_zip_mem = BytesIO() # الملف اللي فيه كل شيء (المترجم + الأصلي لو فشل)
+        remaining_zip_mem = BytesIO() # الملف اللي فيه "فقط" اللي ما تترجم
+        
+        all_text_tasks = []
+        failed_count = 0
+        
+        with zipfile.ZipFile(final_zip_mem, 'w') as out_zip, \
+             zipfile.ZipFile(remaining_zip_mem, 'w') as rem_zip:
+            
+            # 1. جمع الملفات من كل الـ ZIPs المرفوعة
+            for uploaded_zip in uploaded_zips:
+                with zipfile.ZipFile(uploaded_zip, 'r') as z:
+                    for name in z.namelist():
+                        if name.endswith(('.json', '.js')):
+                            all_text_tasks.append((name, z.read(name)))
+                        elif not name.endswith('/'):
+                            # ملفات الميديا والخطوط تنقل فوراً للملف النهائي
+                            out_zip.writestr(name, z.read(name))
+
+            # 2. الترجمة المتوازية باستخدام الـ Threads
+            progress = st.progress(0)
+            status_text = st.empty()
+            
+            with ThreadPoolExecutor(max_workers=speed) as executor:
+                futures = []
+                for idx, task in enumerate(all_text_tasks):
+                    # توزيع المفاتيح بالتناوب (Round Robin)
+                    current_key = valid_keys[idx % len(valid_keys)]
+                    futures.append(executor.submit(translate_core, task[1], task[0], current_key))
                 
-                status_text.text(f"جاري تعريب: {filename} ({idx+1}/{len(text_files)})")
-                
-                # محاولة الترجمة مع التبديل التلقائي بين المفاتيح
-                success = False
-                for current_key in api_keys:
-                    res_status, res_text, active_key = translate_via_openrouter(content, filename, current_key, model_choice)
+                for idx, (future, task) in enumerate(zip(futures, all_text_tasks)):
+                    result_text, is_success = future.result()
                     
-                    if res_status is True:
-                        t_zip.writestr(filename, res_text)
-                        completed += 1
-                        success = True
-                        break # نجحت الترجمة، انتقل للملف التالي
-                    elif res_status == "QUOTA_EXCEEDED":
-                        continue # الكوتا خلصت، جرب المفتاح التالي
-                
-                if not success:
-                    # لو جرب كل المفاتيح وما نفع
-                    if any(translate_via_openrouter(content, filename, k, model_choice)[0] == "QUOTA_EXCEEDED" for k in api_keys):
-                        all_keys_dead = True
-                        st.error("⚠️ جميع المفاتيح استهلكت حصتها!")
-                    r_zip.writestr(filename, content)
-
-                progress_bar.progress((idx + 1) / len(text_files))
+                    # نضع النتيجة (سواء ترجمت أو لا) في الملف النهائي عشان اللعبة تشتغل
+                    out_zip.writestr(task[0], result_text)
+                    
+                    if not is_success:
+                        failed_count += 1
+                        # نضع الملف "الأصلي" في ملف المتبقيات عشان تعيد ترجمته لاحقاً
+                        rem_zip.writestr(task[0], task[1])
+                    
+                    progress.progress((idx + 1) / len(all_text_tasks))
+                    status_text.text(f"جاري معالجة: {task[0]} ({idx+1}/{len(all_text_tasks)})")
 
         st.divider()
-        st.success(f"✅ اكتملت العملية! تم تعريب {completed} ملف.")
+        st.success(f"✅ انتهت العملية! تم تعريب {len(all_text_tasks) - failed_count} ملف بنجاح.")
         
-        c1, c2 = st.columns(2)
-        with c1:
-            st.download_button("📥 تحميل ما تم تعريبه", translated_zip.getvalue(), "Translated_Game.zip")
-        if all_keys_dead or (completed < len(text_files)):
-            with c2:
-                st.download_button("📥 تحميل الملفات المتبقية (للمرة القادمة)", remaining_zip.getvalue(), "Remaining_Files.zip")
+        # عرض أزرار التحميل
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.info("تحميل اللعبة كاملة (المترجم + الباقي كما هو)")
+            st.download_button("📥 تحميل اللعبة المعربة", final_zip_mem.getvalue(), "Arabic_Game_Full.zip")
+            
+        if failed_count > 0:
+            with col2:
+                st.warning(f"يوجد {failed_count} ملف لم يترجم (خلصت التوكنات؟)")
+                st.download_button("📥 تحميل المتبقيات فقط (للمرة القادمة)", remaining_zip_mem.getvalue(), "Remaining_Files.zip")
+else:
+    if not uploaded_zips:
+        st.info("💡 بانتظار رفع ملفات الـ ZIP...")
+    if not any(st.session_state.api_keys):
+        st.error("🔑 يرجى إضافة مفتاح API واحد على الأقل من القائمة الجانبية.")
